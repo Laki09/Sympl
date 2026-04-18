@@ -26,14 +26,14 @@ Edit `backend/.env`:
 DIFY_API_BASE=https://api.dify.ai/v1
 DIFY_API_KEY=your-real-dify-workflow-api-key
 DIFY_APP_MODE=workflow
-DIFY_INPUT_KEY=prompt
+DIFY_INPUT_KEY=Prompt
 FRONTEND_ORIGIN=http://localhost:3000
 ```
 
 The project is configured for a Dify Workflow by default:
 
 - `DIFY_APP_MODE=workflow` calls `/workflows/run`
-- `DIFY_INPUT_KEY=prompt` must match the Start node input variable in Dify
+- `DIFY_INPUT_KEY=Prompt` must match the Start node input variable in Dify
 - `DIFY_API_KEY` must be the API key of the published Dify Workflow app
 
 If your Dify workflow input variable is called `message`, set:
@@ -42,7 +42,7 @@ If your Dify workflow input variable is called `message`, set:
 DIFY_INPUT_KEY=message
 ```
 
-For this project, use `prompt` in Dify so the default works without changes.
+For this project, use `Prompt` in Dify so the default works without changes.
 
 ### Dify Workflow Setup
 
@@ -60,7 +60,7 @@ Start
 Start node input:
 
 ```text
-prompt
+Prompt
 ```
 
 Prompt Analyzer should return JSON:

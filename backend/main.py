@@ -6,20 +6,24 @@ from threading import Lock
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT_DIR / ".env")
-load_dotenv(Path(__file__).with_name(".env"), override=True)
+BACKEND_ENV_PATH = Path(__file__).with_name(".env")
+CONFIG = {
+    **os.environ,
+    **dotenv_values(BACKEND_ENV_PATH),
+    **dotenv_values(ROOT_DIR / ".env"),
+}
 
-DIFY_API_BASE = os.getenv("DIFY_API_BASE", "https://api.dify.ai/v1").rstrip("/")
-DIFY_API_KEY = os.getenv("DIFY_API_KEY")
-DIFY_APP_MODE = os.getenv("DIFY_APP_MODE", "chat").lower()
-DIFY_INPUT_KEY = os.getenv("DIFY_INPUT_KEY", "query")
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+DIFY_API_BASE = CONFIG.get("DIFY_API_BASE", "https://api.dify.ai/v1").rstrip("/")
+DIFY_API_KEY = CONFIG.get("DIFY_API_KEY")
+DIFY_APP_MODE = CONFIG.get("DIFY_APP_MODE", "chat").lower()
+DIFY_INPUT_KEY = CONFIG.get("DIFY_INPUT_KEY", "query")
+FRONTEND_ORIGIN = CONFIG.get("FRONTEND_ORIGIN", "http://localhost:3000")
 
 app = FastAPI(title="Sympl Backend")
 

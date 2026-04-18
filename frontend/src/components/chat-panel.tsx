@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { createUserAccount, fetchUsers, sendChatMessage } from "@/lib/api";
-import type { ChatMessage, ServiceCredentialPayload, UserAccountSummary } from "@/lib/types";
+import { FormEvent, useMemo, useState } from "react";
+import { sendChatMessage } from "@/lib/api";
+import type { ChatMessage } from "@/lib/types";
 
 const initialMessages: ChatMessage[] = [
   {
@@ -13,155 +13,47 @@ const initialMessages: ChatMessage[] = [
   },
 ];
 
-type AuthMode = "login" | "register";
-
-type RegisterFormState = {
+type MockUser = {
   user: string;
   displayName: string;
-  moodleUsername: string;
-  moodlePassword: string;
-  artemisUsername: string;
-  artemisPassword: string;
 };
 
 export function ChatPanel() {
-  const [authMode, setAuthMode] = useState<AuthMode>("login");
-  const [accounts, setAccounts] = useState<UserAccountSummary[]>([]);
-  const [selectedLoginUser, setSelectedLoginUser] = useState("");
-  const [activeUser, setActiveUser] = useState<UserAccountSummary | null>(null);
-  const [registerForm, setRegisterForm] = useState<RegisterFormState>({
-
-    user: "",
-    displayName: "",
-    moodleUsername: "",
-    moodlePassword: "",
-    artemisUsername: "",
-    artemisPassword: "",
-  });
+  const [displayName, setDisplayName] = useState("");
+  const [userId, setUserId] = useState("");
+  const [activeUser, setActiveUser] = useState<MockUser | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
-  const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
-  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
 
-  const canLogin = useMemo(() => selectedLoginUser.trim().length > 0, [selectedLoginUser]);
-  const canRegister = useMemo(() => {
-    return (
-      registerForm.user.trim().length > 1 &&
-      registerForm.displayName.trim().length > 1 &&
-      !isCreatingAccount
-    );
-  }, [isCreatingAccount, registerForm.displayName, registerForm.user]);
+  const canEnterChat = useMemo(() => {
+    return displayName.trim().length > 1 || userId.trim().length > 1;
+  }, [displayName, userId]);
+
   const canSubmit = useMemo(() => {
     return input.trim().length > 0 && activeUser !== null && !isSending;
   }, [activeUser, input, isSending]);
 
-  useEffect(() => {
-    async function loadAccounts() {
-      setIsLoadingAccounts(true);
-      setAuthError(null);
-
-      try {
-        const response = await fetchUsers();
-        setAccounts(response.users);
-        setSelectedLoginUser((current) => current || response.users[0]?.user || "");
-      } catch (unknownError) {
-        setAuthError(
-          unknownError instanceof Error
-            ? unknownError.message
-            : "Die Accounts konnten nicht geladen werden.",
-        );
-      } finally {
-        setIsLoadingAccounts(false);
-      }
-    }
-
-    void loadAccounts();
-  }, []);
-
-  function handleLogin(event: FormEvent<HTMLFormElement>) {
+  function handleMockLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const account = accounts.find((entry) => entry.user === selectedLoginUser.trim());
-    if (!account) {
-      setAuthError("Bitte waehle einen vorhandenen Account aus.");
+    const normalizedName = displayName.trim();
+    const normalizedUser = userId.trim().toLowerCase() || normalizedName.toLowerCase().replace(/\s+/g, "-");
+
+    if (!normalizedName && !normalizedUser) {
+      setAuthError("Gib bitte mindestens einen Namen oder eine User ID ein.");
       return;
     }
 
-    setActiveUser(account);
+    setActiveUser({
+      user: normalizedUser || "demo-user",
+      displayName: normalizedName || normalizedUser || "Demo User",
+    });
     setAuthError(null);
     setChatError(null);
-  }
-
-  async function handleRegister(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!canRegister) {
-      return;
-    }
-
-    setIsCreatingAccount(true);
-    setAuthError(null);
-
-    try {
-      const services: ServiceCredentialPayload[] = [];
-
-      if (registerForm.moodleUsername.trim() && registerForm.moodlePassword.trim()) {
-        services.push({
-          serviceKey: "moodle",
-          label: "Moodle",
-          username: registerForm.moodleUsername.trim(),
-          password: registerForm.moodlePassword,
-        });
-      }
-
-      if (registerForm.artemisUsername.trim() && registerForm.artemisPassword.trim()) {
-        services.push({
-          serviceKey: "artemis",
-          label: "Artemis",
-          username: registerForm.artemisUsername.trim(),
-          password: registerForm.artemisPassword,
-        });
-      }
-
-      await createUserAccount({
-        user: registerForm.user.trim(),
-        displayName: registerForm.displayName.trim(),
-        services,
-      });
-
-      const nextAccount: UserAccountSummary = {
-        user: registerForm.user.trim().toLowerCase(),
-        displayName: registerForm.displayName.trim(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      setAccounts((current) =>
-        [...current, nextAccount].sort((left, right) => left.displayName.localeCompare(right.displayName)),
-      );
-      setSelectedLoginUser(nextAccount.user);
-      setActiveUser(nextAccount);
-      setRegisterForm({
-        user: "",
-        displayName: "",
-        moodleUsername: "",
-        moodlePassword: "",
-        artemisUsername: "",
-        artemisPassword: "",
-      });
-    } catch (unknownError) {
-      setAuthError(
-        unknownError instanceof Error
-          ? unknownError.message
-          : "Der Account konnte nicht erstellt werden.",
-      );
-    } finally {
-      setIsCreatingAccount(false);
-    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -215,144 +107,49 @@ export function ChatPanel() {
 
   if (!activeUser) {
     return (
-      <section className="auth-shell" aria-label="Anmeldung">
+      <section className="auth-shell" aria-label="Mock Anmeldung">
         <div className="auth-hero">
           <p className="auth-kicker">Sympl</p>
-          <h1>Dein Lern-Chat mit Moodle und Artemis im Hintergrund.</h1>
+          <h1>Direkt rein in den Chat.</h1>
           <p className="auth-copy">
-            Melde dich mit einem bestehenden Account an oder registriere dich einmal mit den
-            wichtigsten Hochschulzugangsdaten.
+            Die Anmeldung ist aktuell nur ein Mock. Gib kurz deinen Namen oder eine User ID ein,
+            dann landest du direkt im Chat.
           </p>
         </div>
 
         <div className="auth-card">
           <div className="auth-tabs" role="tablist" aria-label="Authentifizierung">
-            <button
-              className={authMode === "login" ? "auth-tab auth-tab-active" : "auth-tab"}
-              onClick={() => setAuthMode("login")}
-              type="button"
-            >
-              Anmelden
+            <button className="auth-tab auth-tab-active" type="button">
+              Mock Login
             </button>
-            <button
-              className={authMode === "register" ? "auth-tab auth-tab-active" : "auth-tab"}
-              onClick={() => setAuthMode("register")}
-              type="button"
-            >
-              Registrieren
+            <button className="auth-tab" disabled type="button">
+              Spaeter echt
             </button>
           </div>
 
-          {authMode === "login" ? (
-            <form className="auth-form" onSubmit={handleLogin}>
-              <label className="field">
-                <span>Account</span>
-                <select
-                  onChange={(event) => setSelectedLoginUser(event.target.value)}
-                  value={selectedLoginUser}
-                >
-                  <option value="">Account auswaehlen</option>
-                  {accounts.map((account) => (
-                    <option key={account.user} value={account.user}>
-                      {account.displayName} ({account.user})
-                    </option>
-                  ))}
-                </select>
-              </label>
+          <form className="auth-form" onSubmit={handleMockLogin}>
+            <label className="field">
+              <span>Name</span>
+              <input
+                onChange={(event) => setDisplayName(event.target.value)}
+                placeholder="Rufus"
+                value={displayName}
+              />
+            </label>
 
-              <button className="primary-button" disabled={!canLogin || isLoadingAccounts} type="submit">
-                {isLoadingAccounts ? "Laedt..." : "In den Chat"}
-              </button>
-            </form>
-          ) : (
-            <form className="auth-form" onSubmit={handleRegister}>
-              <div className="auth-grid">
-                <label className="field">
-                  <span>User ID</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({ ...current, user: event.target.value }))
-                    }
-                    placeholder="rufus"
-                    value={registerForm.user}
-                  />
-                </label>
+            <label className="field">
+              <span>User ID</span>
+              <input
+                onChange={(event) => setUserId(event.target.value)}
+                placeholder="rufus"
+                value={userId}
+              />
+            </label>
 
-                <label className="field">
-                  <span>Name</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({ ...current, displayName: event.target.value }))
-                    }
-                    placeholder="Rufus"
-                    value={registerForm.displayName}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>Moodle Username</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({
-                        ...current,
-                        moodleUsername: event.target.value,
-                      }))
-                    }
-                    placeholder="s1234567"
-                    value={registerForm.moodleUsername}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>Moodle Passwort</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({
-                        ...current,
-                        moodlePassword: event.target.value,
-                      }))
-                    }
-                    placeholder="Passwort"
-                    type="password"
-                    value={registerForm.moodlePassword}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>Artemis Username</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({
-                        ...current,
-                        artemisUsername: event.target.value,
-                      }))
-                    }
-                    placeholder="s1234567"
-                    value={registerForm.artemisUsername}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>Artemis Passwort</span>
-                  <input
-                    onChange={(event) =>
-                      setRegisterForm((current) => ({
-                        ...current,
-                        artemisPassword: event.target.value,
-                      }))
-                    }
-                    placeholder="Passwort"
-                    type="password"
-                    value={registerForm.artemisPassword}
-                  />
-                </label>
-              </div>
-
-              <button className="primary-button" disabled={!canRegister} type="submit">
-                {isCreatingAccount ? "Erstellt..." : "Account erstellen"}
-              </button>
-            </form>
-          )}
+            <button className="primary-button" disabled={!canEnterChat} type="submit">
+              In den Chat
+            </button>
+          </form>
 
           {authError ? <p className="auth-error">{authError}</p> : null}
         </div>
@@ -372,7 +169,6 @@ export function ChatPanel() {
           Abmelden
         </button>
       </header>
-
 
       <div className="message-list" aria-live="polite">
         {messages.map((message) => (

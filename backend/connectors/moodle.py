@@ -315,11 +315,12 @@ async def extract_materials_from_current_page(
         if not is_likely_course_material(title, url):
             continue
 
+        resolved_url = await resolve_moodle_resource_url(page, url)
         materials.append(
             build_material(
                 id_value=f"{id_prefix}-{index}",
                 title=title[:180],
-                url=url,
+                url=resolved_url,
                 course=course,
                 summary=f"Moodle material found in '{course}': {title}",
             )
@@ -383,6 +384,29 @@ async def resolve_course_title(page: Page, fallback: str) -> str:
             continue
 
     return fallback
+
+
+async def resolve_moodle_resource_url(page: Page, url: str) -> str:
+    if "/mod/resource/view.php" not in url:
+        return url
+
+    try:
+        response = await page.context.request.get(url, max_redirects=10, timeout=20_000)
+    except Exception:
+        return url
+
+    content_type = response.headers.get("content-type", "").lower()
+    content_disposition = response.headers.get("content-disposition", "").lower()
+    final_url = response.url
+
+    if (
+        "pluginfile.php" in final_url
+        or "application/pdf" in content_type
+        or "filename=" in content_disposition
+    ):
+        return final_url
+
+    return url
 
 
 async def try_moodle_search(page: Page, query: str) -> None:

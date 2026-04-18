@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { sendChatMessage } from "@/lib/api";
@@ -15,6 +15,8 @@ const initialMessages: ChatMessage[] = [
   },
 ];
 
+const thinkingStatuses = ["crawling", "searching", "thinking"];
+
 type MockUser = {
   user: string;
   displayName: string;
@@ -28,8 +30,22 @@ export function ChatPanel() {
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [isSending, setIsSending] = useState(false);
+  const [thinkingStatusIndex, setThinkingStatusIndex] = useState(0);
   const [authError, setAuthError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSending) {
+      setThinkingStatusIndex(0);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setThinkingStatusIndex((current) => (current + 1) % thinkingStatuses.length);
+    }, 1100);
+
+    return () => window.clearInterval(intervalId);
+  }, [isSending]);
 
   const canEnterChat = useMemo(() => {
     return displayName.trim().length > 1 && password.trim().length > 0;
@@ -195,6 +211,13 @@ export function ChatPanel() {
             )}
           </article>
         ))}
+
+        {isSending ? (
+          <article className="message message-assistant message-thinking" aria-live="polite">
+            <span className="thinking-dot" aria-hidden="true" />
+            <span>{thinkingStatuses[thinkingStatusIndex]}</span>
+          </article>
+        ) : null}
       </div>
 
       <form className="composer composer-floating" onSubmit={handleSubmit}>
@@ -206,7 +229,7 @@ export function ChatPanel() {
             value={input}
           />
           <button className="send-button" disabled={!canSubmit} type="submit">
-            {isSending ? "Sending..." : "Send"}
+            {isSending ? thinkingStatuses[thinkingStatusIndex] : "Send"}
           </button>
         </div>
 

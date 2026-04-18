@@ -28,9 +28,8 @@ body {
 
 body {
   background:
-    radial-gradient(circle at top left, rgba(184, 92, 56, 0.16), transparent 28%),
-    radial-gradient(circle at top right, rgba(28, 115, 103, 0.12), transparent 22%),
-    linear-gradient(180deg, #f7f4ee 0%, #efe9df 100%);
+    radial-gradient(circle at 10% 12%, rgba(122, 63, 34, 0.2), transparent 34%),
+    linear-gradient(135deg, #d3bca6 0%, #ddc9b6 24%, #efe4d7 56%, #fbf7f0 100%);
   color: var(--ink);
   font-family: "Segoe UI", "Helvetica Neue", sans-serif;
 }
@@ -59,6 +58,7 @@ button {
   margin: 0 auto;
   max-width: 1200px;
   min-height: calc(100vh - 48px);
+  position: relative;
 }
 
 .auth-hero {
@@ -73,6 +73,9 @@ button {
   font-weight: 800;
   letter-spacing: 0.08em;
   margin: 0;
+  position: absolute;
+  right: 42px;
+  top: 40px;
   text-transform: uppercase;
 }
 
@@ -80,7 +83,12 @@ h1 {
   font-size: clamp(2.4rem, 5vw, 5.2rem);
   line-height: 0.95;
   margin: 0;
-  max-width: 9ch;
+  max-width: none;
+}
+
+h1 span {
+  display: block;
+  white-space: nowrap;
 }
 
 .auth-copy {
@@ -311,6 +319,10 @@ h1 {
     grid-template-columns: 1fr;
     min-height: auto;
     padding: 24px 0;
+  }
+
+  .auth-kicker {
+    position: static;
   }
 
   .auth-hero {

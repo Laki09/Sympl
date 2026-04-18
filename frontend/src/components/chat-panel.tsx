@@ -9,7 +9,7 @@ const initialMessages: ChatMessage[] = [
     id: "welcome",
     role: "assistant",
     content:
-      "Hi, ich bin Sympl. Frag mich nach Moodle-, Artemis- oder Lerninhalten, und ich lege direkt los.",
+      "Hi, I'm Sympl. Ask me about Moodle, Artemis, deadlines, or course material and I'll jump right in.",
   },
 ];
 
@@ -20,7 +20,7 @@ type MockUser = {
 
 export function ChatPanel() {
   const [displayName, setDisplayName] = useState("");
-  const [userId, setUserId] = useState("");
+  const [password, setPassword] = useState("");
   const [activeUser, setActiveUser] = useState<MockUser | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
@@ -30,8 +30,8 @@ export function ChatPanel() {
   const [chatError, setChatError] = useState<string | null>(null);
 
   const canEnterChat = useMemo(() => {
-    return displayName.trim().length > 1 || userId.trim().length > 1;
-  }, [displayName, userId]);
+    return displayName.trim().length > 1 && password.trim().length > 0;
+  }, [displayName, password]);
 
   const canSubmit = useMemo(() => {
     return input.trim().length > 0 && activeUser !== null && !isSending;
@@ -41,10 +41,10 @@ export function ChatPanel() {
     event.preventDefault();
 
     const normalizedName = displayName.trim();
-    const normalizedUser = userId.trim().toLowerCase() || normalizedName.toLowerCase().replace(/\s+/g, "-");
+    const normalizedUser = normalizedName.toLowerCase().replace(/\s+/g, "-");
 
-    if (!normalizedName && !normalizedUser) {
-      setAuthError("Gib bitte mindestens einen Namen oder eine User ID ein.");
+    if (!normalizedName || !password.trim()) {
+      setAuthError("Enter your name and password to continue.");
       return;
     }
 
@@ -107,23 +107,24 @@ export function ChatPanel() {
 
   if (!activeUser) {
     return (
-      <section className="auth-shell" aria-label="Mock Anmeldung">
+      <section className="auth-shell" aria-label="Mock sign in">
         <div className="auth-hero">
           <p className="auth-kicker">Sympl</p>
-          <h1>Direkt rein in den Chat.</h1>
-          <p className="auth-copy">
-            Die Anmeldung ist aktuell nur ein Mock. Gib kurz deinen Namen oder eine User ID ein,
-            dann landest du direkt im Chat.
-          </p>
+          <h1>
+            <span>Stop searching</span>
+            <span>Start learning</span>
+            <span>Sympl.</span>
+          </h1>
+          <p className="auth-copy">from students for students</p>
         </div>
 
         <div className="auth-card">
-          <div className="auth-tabs" role="tablist" aria-label="Authentifizierung">
+          <div className="auth-tabs" role="tablist" aria-label="Authentication">
             <button className="auth-tab auth-tab-active" type="button">
-              Mock Login
+              Login
             </button>
             <button className="auth-tab" disabled type="button">
-              Spaeter echt
+              Register
             </button>
           </div>
 
@@ -138,16 +139,17 @@ export function ChatPanel() {
             </label>
 
             <label className="field">
-              <span>User ID</span>
+              <span>Password</span>
               <input
-                onChange={(event) => setUserId(event.target.value)}
-                placeholder="rufus"
-                value={userId}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Password"
+                type="password"
+                value={password}
               />
             </label>
 
             <button className="primary-button" disabled={!canEnterChat} type="submit">
-              In den Chat
+              Enter Chat
             </button>
           </form>
 
@@ -166,7 +168,7 @@ export function ChatPanel() {
         </div>
 
         <button className="ghost-button" onClick={handleLogout} type="button">
-          Abmelden
+          Log out
         </button>
       </header>
 
@@ -181,13 +183,13 @@ export function ChatPanel() {
       <form className="composer composer-floating" onSubmit={handleSubmit}>
         <div className="input-row input-row-chatgpt">
           <textarea
-            aria-label="Nachricht"
+            aria-label="Message"
             onChange={(event) => setInput(event.target.value)}
-            placeholder="Frage nach Materialien, Fristen oder Inhalten ..."
+            placeholder="Ask about materials, deadlines, or course content..."
             value={input}
           />
           <button className="send-button" disabled={!canSubmit} type="submit">
-            {isSending ? "Sendet..." : "Senden"}
+            {isSending ? "Sending..." : "Send"}
           </button>
         </div>
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -338,7 +338,8 @@ def delete_service_credentials(user: str, service_key: str) -> dict[str, str]:
 
 
 @app.post("/api/materials/search", response_model=MaterialSearchResponse)
-def search_materials(payload: MaterialSearchRequest) -> MaterialSearchResponse:
+def search_materials(raw_payload: dict[str, Any] = Body(default_factory=dict)) -> MaterialSearchResponse:
+    payload = normalize_material_search_payload(raw_payload)
     requested_terms = normalize_terms([payload.query, *payload.keywords])
     requested_sources = {source.lower() for source in payload.sources}
 
@@ -466,6 +467,59 @@ def parse_dify_response(data: dict[str, Any]) -> ChatResponse:
         answer = str(outputs) if outputs else "Der Workflow hat keine Antwort ausgegeben."
 
     return ChatResponse(answer=answer)
+
+
+def normalize_material_search_payload(raw_payload: dict[str, Any]) -> MaterialSearchRequest:
+    query = (
+        raw_payload.get("query")
+        or raw_payload.get("prompt")
+        or raw_payload.get("Prompt")
+        or raw_payload.get("text")
+        or raw_payload.get("input")
+        or ""
+    )
+
+    keywords = ensure_string_list(raw_payload.get("keywords"))
+    sources = ensure_string_list(raw_payload.get("sources")) or ["moodle", "artemis"]
+
+    try:
+        limit = int(raw_payload.get("limit", 5))
+    except (TypeError, ValueError):
+        limit = 5
+
+    if not str(query).strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing search query. Send one of these JSON fields: "
+                "query, prompt, Prompt, text, input."
+            ),
+        )
+
+    return MaterialSearchRequest(
+        query=str(query).strip(),
+        keywords=keywords,
+        sources=sources,
+        limit=max(1, min(limit, 20)),
+    )
+
+
+def ensure_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    if isinstance(value, str):
+        stripped = value.strip()
+
+        if not stripped:
+            return []
+
+        return [item.strip() for item in stripped.split(",") if item.strip()]
+
+    return [str(value).strip()] if str(value).strip() else []
 
 
 def normalize_terms(values: list[str]) -> list[str]:

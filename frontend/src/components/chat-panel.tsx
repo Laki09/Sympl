@@ -2,58 +2,120 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  createUserAccount,
   deleteServiceCredential,
   fetchServiceCredentials,
+  fetchUsers,
   saveServiceCredential,
   sendChatMessage,
 } from "@/lib/api";
-import type { ChatMessage, ServiceCredentialPayload, StoredServiceCredential } from "@/lib/types";
+import type {
+  ChatMessage,
+  ServiceCredentialPayload,
+  StoredServiceCredential,
+  UserAccountSummary,
+} from "@/lib/types";
 
 const initialMessages: ChatMessage[] = [
   {
     id: "welcome",
     role: "assistant",
     content:
-      "Hi, ich bin die Sympl-Oberflaeche. Stell eine Frage und ich sende sie an euer Backend, sobald die API steht.",
+      "Hi, ich bin die Sympl-Oberflaeche. Lege einmal deinen Account an und ich nutze die gespeicherten Zugaenge fuer weitere Anfragen.",
   },
 ];
+
+type AccountFormState = {
+  user: string;
+  displayName: string;
+  moodleUsername: string;
+  moodlePassword: string;
+  artemisUsername: string;
+  artemisPassword: string;
+};
+
+const emptyExtraServiceForm: ServiceCredentialPayload = {
+  serviceKey: "",
+  label: "",
+  username: "",
+  password: "",
+  notes: "",
+};
 
 export function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
-  const [userId, setUserId] = useState("demo-user");
-  const [isSending, setIsSending] = useState(false);
-  const [isSavingCredential, setIsSavingCredential] = useState(false);
-  const [isLoadingServices, setIsLoadingServices] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [credentialError, setCredentialError] = useState<string | null>(null);
+  const [accounts, setAccounts] = useState<UserAccountSummary[]>([]);
+  const [selectedUser, setSelectedUser] = useState("");
   const [services, setServices] = useState<StoredServiceCredential[]>([]);
-  const [serviceForm, setServiceForm] = useState<ServiceCredentialPayload>({
-    serviceKey: "moodle",
-    label: "Moodle",
-    baseUrl: "",
-    loginUrl: "",
-    username: "",
-    password: "",
-    notes: "",
+  const [accountForm, setAccountForm] = useState<AccountFormState>({
+    user: "",
+    displayName: "",
+    moodleUsername: "",
+    moodlePassword: "",
+    artemisUsername: "",
+    artemisPassword: "",
   });
+  const [extraServiceForm, setExtraServiceForm] =
+    useState<ServiceCredentialPayload>(emptyExtraServiceForm);
+  const [isSending, setIsSending] = useState(false);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
+  const [isLoadingServices, setIsLoadingServices] = useState(false);
+  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
+  const [isSavingService, setIsSavingService] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [serviceError, setServiceError] = useState<string | null>(null);
 
-  const canSubmit = useMemo(() => input.trim().length > 0 && !isSending, [input, isSending]);
-  const canSaveCredential = useMemo(() => {
+  const canSubmit = useMemo(() => {
+    return input.trim().length > 0 && selectedUser.trim().length > 0 && !isSending;
+  }, [input, isSending, selectedUser]);
+
+  const canCreateAccount = useMemo(() => {
     return (
-      userId.trim().length > 0 &&
-      serviceForm.serviceKey.trim().length > 1 &&
-      serviceForm.label.trim().length > 1 &&
-      serviceForm.baseUrl.trim().length > 2 &&
-      serviceForm.username.trim().length > 0 &&
-      serviceForm.password.trim().length > 0 &&
-      !isSavingCredential
+      accountForm.user.trim().length > 1 &&
+      accountForm.displayName.trim().length > 1 &&
+      !isCreatingAccount
     );
-  }, [isSavingCredential, serviceForm, userId]);
+  }, [accountForm.displayName, accountForm.user, isCreatingAccount]);
+
+  const canSaveExtraService = useMemo(() => {
+    return (
+      selectedUser.trim().length > 0 &&
+      extraServiceForm.serviceKey.trim().length > 1 &&
+      extraServiceForm.label.trim().length > 1 &&
+      extraServiceForm.username.trim().length > 0 &&
+      extraServiceForm.password.trim().length > 0 &&
+      !isSavingService
+    );
+  }, [extraServiceForm, isSavingService, selectedUser]);
 
   useEffect(() => {
-    const normalizedUser = userId.trim();
+    async function loadAccounts() {
+      setIsLoadingAccounts(true);
+      setAccountError(null);
+
+      try {
+        const response = await fetchUsers();
+        setAccounts(response.users);
+        setSelectedUser((current) => current || response.users[0]?.user || "");
+      } catch (unknownError) {
+        setAccountError(
+          unknownError instanceof Error
+            ? unknownError.message
+            : "Die Accounts konnten nicht geladen werden.",
+        );
+      } finally {
+        setIsLoadingAccounts(false);
+      }
+    }
+
+    void loadAccounts();
+  }, []);
+
+  useEffect(() => {
+    const normalizedUser = selectedUser.trim();
 
     if (!normalizedUser) {
       setServices([]);
@@ -62,13 +124,13 @@ export function ChatPanel() {
 
     async function loadServices() {
       setIsLoadingServices(true);
-      setCredentialError(null);
+      setServiceError(null);
 
       try {
         const response = await fetchServiceCredentials(normalizedUser);
         setServices(response.services);
       } catch (unknownError) {
-        setCredentialError(
+        setServiceError(
           unknownError instanceof Error
             ? unknownError.message
             : "Die gespeicherten Services konnten nicht geladen werden.",
@@ -79,14 +141,13 @@ export function ChatPanel() {
     }
 
     void loadServices();
-  }, [userId]);
+  }, [selectedUser]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const query = input.trim();
-    const normalizedUser = userId.trim();
 
-    if (!query || !normalizedUser) {
+    if (!query || !selectedUser.trim()) {
       return;
     }
 
@@ -102,7 +163,7 @@ export function ChatPanel() {
     setError(null);
 
     try {
-      const response = await sendChatMessage(query, conversationId, normalizedUser);
+      const response = await sendChatMessage(query, conversationId, selectedUser.trim());
       setConversationId(response.conversationId);
       setMessages((current) => [
         ...current,
@@ -123,62 +184,118 @@ export function ChatPanel() {
     }
   }
 
-  async function handleCredentialSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleCreateAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalizedUser = userId.trim();
 
-    if (!normalizedUser || !canSaveCredential) {
+    if (!canCreateAccount) {
       return;
     }
 
-    setIsSavingCredential(true);
-    setCredentialError(null);
+    setIsCreatingAccount(true);
+    setAccountError(null);
 
     try {
-      const savedService = await saveServiceCredential(normalizedUser, {
-        serviceKey: serviceForm.serviceKey.trim(),
-        label: serviceForm.label.trim(),
-        baseUrl: serviceForm.baseUrl.trim(),
-        loginUrl: serviceForm.loginUrl?.trim() || undefined,
-        username: serviceForm.username.trim(),
-        password: serviceForm.password,
-        notes: serviceForm.notes?.trim() || undefined,
+      const services: ServiceCredentialPayload[] = [];
+
+      if (accountForm.moodleUsername.trim() && accountForm.moodlePassword.trim()) {
+        services.push({
+          serviceKey: "moodle",
+          label: "Moodle",
+          username: accountForm.moodleUsername.trim(),
+          password: accountForm.moodlePassword,
+        });
+      }
+
+      if (accountForm.artemisUsername.trim() && accountForm.artemisPassword.trim()) {
+        services.push({
+          serviceKey: "artemis",
+          label: "Artemis",
+          username: accountForm.artemisUsername.trim(),
+          password: accountForm.artemisPassword,
+        });
+      }
+
+      await createUserAccount({
+        user: accountForm.user.trim(),
+        displayName: accountForm.displayName.trim(),
+        services,
+      });
+
+      const nextAccount: UserAccountSummary = {
+        user: accountForm.user.trim().toLowerCase(),
+        displayName: accountForm.displayName.trim(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      setAccounts((current) => [...current, nextAccount].sort((left, right) => left.displayName.localeCompare(right.displayName)));
+      setSelectedUser(nextAccount.user);
+      setAccountForm({
+        user: "",
+        displayName: "",
+        moodleUsername: "",
+        moodlePassword: "",
+        artemisUsername: "",
+        artemisPassword: "",
+      });
+    } catch (unknownError) {
+      setAccountError(
+        unknownError instanceof Error
+          ? unknownError.message
+          : "Der Account konnte nicht erstellt werden.",
+      );
+    } finally {
+      setIsCreatingAccount(false);
+    }
+  }
+
+  async function handleExtraServiceSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!canSaveExtraService) {
+      return;
+    }
+
+    setIsSavingService(true);
+    setServiceError(null);
+
+    try {
+      const savedService = await saveServiceCredential(selectedUser.trim(), {
+        serviceKey: extraServiceForm.serviceKey.trim(),
+        label: extraServiceForm.label.trim(),
+        username: extraServiceForm.username.trim(),
+        password: extraServiceForm.password,
+        notes: extraServiceForm.notes?.trim() || undefined,
       });
 
       setServices((current) => {
         const next = current.filter((service) => service.serviceKey !== savedService.serviceKey);
         return [...next, savedService].sort((left, right) => left.label.localeCompare(right.label));
       });
-      setServiceForm((current) => ({
-        ...current,
-        password: "",
-        notes: "",
-      }));
+      setExtraServiceForm(emptyExtraServiceForm);
     } catch (unknownError) {
-      setCredentialError(
+      setServiceError(
         unknownError instanceof Error
           ? unknownError.message
-          : "Die Zugangsdaten konnten nicht gespeichert werden.",
+          : "Der zusaetzliche Service konnte nicht gespeichert werden.",
       );
     } finally {
-      setIsSavingCredential(false);
+      setIsSavingService(false);
     }
   }
 
   async function handleDeleteService(serviceKey: string) {
-    const normalizedUser = userId.trim();
-
-    if (!normalizedUser) {
+    if (!selectedUser.trim()) {
       return;
     }
 
-    setCredentialError(null);
+    setServiceError(null);
 
     try {
-      await deleteServiceCredential(normalizedUser, serviceKey);
+      await deleteServiceCredential(selectedUser.trim(), serviceKey);
       setServices((current) => current.filter((service) => service.serviceKey !== serviceKey));
     } catch (unknownError) {
-      setCredentialError(
+      setServiceError(
         unknownError instanceof Error
           ? unknownError.message
           : "Der Service konnte nicht entfernt werden.",
@@ -196,33 +313,127 @@ export function ChatPanel() {
         <span className="connection-pill">Backend API</span>
       </header>
 
-      <section className="credential-panel" aria-label="Service-Zugaenge">
+      <section className="credential-panel" aria-label="Account und Zugaenge">
         <div className="credential-panel-header">
           <div>
-            <h3>Zugaenge pro User</h3>
-            <p>Moodle und weitere Portale werden pro Nutzer gespeichert und bei jedem Prompt mitgesendet.</p>
+            <h3>Account und Zugaenge</h3>
+            <p>
+              Moodle und Artemis werden direkt bei der Account-Erstellung gespeichert. Weitere
+              Services kannst du spaeter ergaenzen, ohne die Login-Links manuell einzutragen.
+            </p>
           </div>
         </div>
 
-        <form className="credential-form" onSubmit={handleCredentialSubmit}>
-          <label className="field">
-            <span>User ID</span>
-            <input
-              onChange={(event) => setUserId(event.target.value)}
-              placeholder="demo-user"
-              value={userId}
-            />
-          </label>
-
+        <form className="credential-form" onSubmit={handleCreateAccount}>
           <div className="credential-grid">
             <label className="field">
-              <span>Service Key</span>
+              <span>User ID</span>
               <input
                 onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, serviceKey: event.target.value }))
+                  setAccountForm((current) => ({ ...current, user: event.target.value }))
                 }
-                placeholder="moodle"
-                value={serviceForm.serviceKey}
+                placeholder="rufus"
+                value={accountForm.user}
+              />
+            </label>
+
+            <label className="field">
+              <span>Anzeigename</span>
+              <input
+                onChange={(event) =>
+                  setAccountForm((current) => ({ ...current, displayName: event.target.value }))
+                }
+                placeholder="Rufus"
+                value={accountForm.displayName}
+              />
+            </label>
+
+            <label className="field">
+              <span>Moodle Username</span>
+              <input
+                onChange={(event) =>
+                  setAccountForm((current) => ({ ...current, moodleUsername: event.target.value }))
+                }
+                placeholder="s1234567"
+                value={accountForm.moodleUsername}
+              />
+            </label>
+
+            <label className="field">
+              <span>Moodle Passwort</span>
+              <input
+                onChange={(event) =>
+                  setAccountForm((current) => ({ ...current, moodlePassword: event.target.value }))
+                }
+                placeholder="Passwort"
+                type="password"
+                value={accountForm.moodlePassword}
+              />
+            </label>
+
+            <label className="field">
+              <span>Artemis Username</span>
+              <input
+                onChange={(event) =>
+                  setAccountForm((current) => ({ ...current, artemisUsername: event.target.value }))
+                }
+                placeholder="s1234567"
+                value={accountForm.artemisUsername}
+              />
+            </label>
+
+            <label className="field">
+              <span>Artemis Passwort</span>
+              <input
+                onChange={(event) =>
+                  setAccountForm((current) => ({ ...current, artemisPassword: event.target.value }))
+                }
+                placeholder="Passwort"
+                type="password"
+                value={accountForm.artemisPassword}
+              />
+            </label>
+          </div>
+
+          <div className="credential-actions">
+            <button className="secondary-button" disabled={!canCreateAccount} type="submit">
+              {isCreatingAccount ? "Erstellt..." : "Account erstellen"}
+            </button>
+            <span>
+              {isLoadingAccounts
+                ? "Accounts werden geladen..."
+                : `${accounts.length} Accounts vorhanden`}
+            </span>
+          </div>
+        </form>
+
+        <div className="account-toolbar">
+          <label className="field">
+            <span>Aktiver Account</span>
+            <select
+              onChange={(event) => setSelectedUser(event.target.value)}
+              value={selectedUser}
+            >
+              <option value="">Account auswaehlen</option>
+              {accounts.map((account) => (
+                <option key={account.user} value={account.user}>
+                  {account.displayName} ({account.user})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <form className="credential-form" onSubmit={handleExtraServiceSubmit}>
+          <div className="credential-grid">
+            <label className="field">
+              <span>Weiterer Service Key</span>
+              <input
+                onChange={(event) =>
+                  setExtraServiceForm((current) => ({ ...current, serviceKey: event.target.value }))
+                }
+                placeholder="bibliothek"
+                value={extraServiceForm.serviceKey}
               />
             </label>
 
@@ -230,32 +441,10 @@ export function ChatPanel() {
               <span>Name</span>
               <input
                 onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, label: event.target.value }))
+                  setExtraServiceForm((current) => ({ ...current, label: event.target.value }))
                 }
-                placeholder="Moodle"
-                value={serviceForm.label}
-              />
-            </label>
-
-            <label className="field">
-              <span>Basis-URL</span>
-              <input
-                onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, baseUrl: event.target.value }))
-                }
-                placeholder="https://moodle.example.edu"
-                value={serviceForm.baseUrl}
-              />
-            </label>
-
-            <label className="field">
-              <span>Login-URL</span>
-              <input
-                onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, loginUrl: event.target.value }))
-                }
-                placeholder="https://moodle.example.edu/login"
-                value={serviceForm.loginUrl}
+                placeholder="Bibliothek"
+                value={extraServiceForm.label}
               />
             </label>
 
@@ -263,10 +452,10 @@ export function ChatPanel() {
               <span>Username</span>
               <input
                 onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, username: event.target.value }))
+                  setExtraServiceForm((current) => ({ ...current, username: event.target.value }))
                 }
-                placeholder="s1234567"
-                value={serviceForm.username}
+                placeholder="login"
+                value={extraServiceForm.username}
               />
             </label>
 
@@ -274,11 +463,11 @@ export function ChatPanel() {
               <span>Passwort</span>
               <input
                 onChange={(event) =>
-                  setServiceForm((current) => ({ ...current, password: event.target.value }))
+                  setExtraServiceForm((current) => ({ ...current, password: event.target.value }))
                 }
                 placeholder="Passwort"
                 type="password"
-                value={serviceForm.password}
+                value={extraServiceForm.password}
               />
             </label>
           </div>
@@ -287,21 +476,21 @@ export function ChatPanel() {
             <span>Notiz</span>
             <input
               onChange={(event) =>
-                setServiceForm((current) => ({ ...current, notes: event.target.value }))
+                setExtraServiceForm((current) => ({ ...current, notes: event.target.value }))
               }
-              placeholder="Optional, z. B. Kursraum oder 2FA-Hinweis"
-              value={serviceForm.notes}
+              placeholder="Optional, z. B. 2FA-Hinweis"
+              value={extraServiceForm.notes}
             />
           </label>
 
           <div className="credential-actions">
-            <button className="secondary-button" disabled={!canSaveCredential} type="submit">
-              {isSavingCredential ? "Speichert..." : "Zugang speichern"}
+            <button className="secondary-button" disabled={!canSaveExtraService} type="submit">
+              {isSavingService ? "Speichert..." : "Weiteren Service speichern"}
             </button>
             <span>
               {isLoadingServices
-                ? "Gespeicherte Services werden geladen..."
-                : `${services.length} Services fuer ${userId.trim() || "keinen User"} gespeichert`}
+                ? "Services werden geladen..."
+                : `${services.length} Services fuer ${selectedUser || "keinen Account"} gespeichert`}
             </span>
           </div>
         </form>
@@ -311,11 +500,8 @@ export function ChatPanel() {
             <article className="service-card" key={service.serviceKey}>
               <div>
                 <strong>{service.label}</strong>
-                <p>{service.baseUrl}</p>
-                <p>
-                  Login: {service.username}
-                  {service.loginUrl ? ` | ${service.loginUrl}` : ""}
-                </p>
+                <p>Service Key: {service.serviceKey}</p>
+                <p>Login: {service.username}</p>
               </div>
               <button
                 className="ghost-button"
@@ -329,8 +515,7 @@ export function ChatPanel() {
 
           {services.length === 0 && !isLoadingServices ? (
             <p className="empty-state">
-              Noch keine Services gespeichert. Du kannst hier Moodle und spaeter weitere Portale
-              wie Artemis oder Bibliotheksseiten hinterlegen.
+              Fuer diesen Account sind noch keine Services gespeichert.
             </p>
           ) : null}
         </div>
@@ -359,8 +544,8 @@ export function ChatPanel() {
 
         <div className="composer-meta">
           <span>{input.trim().length} Zeichen</span>
-          {error || credentialError ? (
-            <span className="error-text">{error ?? credentialError}</span>
+          {error || accountError || serviceError ? (
+            <span className="error-text">{error ?? accountError ?? serviceError}</span>
           ) : (
             <span>Backend: /api/chat</span>
           )}

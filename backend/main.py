@@ -43,22 +43,43 @@ class ChatResponse(BaseModel):
     conversationId: str | None = None
 
 
-class ServiceCredentialUpsertRequest(BaseModel):
+class ServiceCredentialInput(BaseModel):
     serviceKey: str = Field(min_length=2)
     label: str = Field(min_length=2)
-    baseUrl: str = Field(min_length=3)
-    loginUrl: str | None = None
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
     notes: str | None = None
+
+
+class ServiceCredentialUpsertRequest(BaseModel):
+    serviceKey: str = Field(min_length=2)
+    label: str = Field(min_length=2)
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    notes: str | None = None
+
+
+class UserAccountCreateRequest(BaseModel):
+    user: str = Field(min_length=2)
+    displayName: str = Field(min_length=2)
+    services: list[ServiceCredentialInput] = Field(default_factory=list)
+
+
+class UserAccountSummary(BaseModel):
+    user: str
+    displayName: str
+    createdAt: str
+    updatedAt: str
+
+
+class UserAccountListResponse(BaseModel):
+    users: list[UserAccountSummary]
 
 
 class StoredServiceCredential(BaseModel):
     user: str
     serviceKey: str
     label: str
-    baseUrl: str
-    loginUrl: str | None = None
     username: str
     password: str
     notes: str | None = None
@@ -94,6 +115,18 @@ class MaterialSearchResponse(BaseModel):
     query: str
     matchedKeywords: list[str]
     materials: list[MaterialItem]
+
+
+SERVICE_LOGIN_URLS: dict[str, dict[str, str]] = {
+    "artemis": {
+        "baseUrl": "https://artemis.tum.de/",
+        "loginUrl": "https://artemis.tum.de/",
+    },
+    "moodle": {
+        "baseUrl": "https://www.moodle.tum.de/",
+        "loginUrl": "https://www.moodle.tum.de/login/index.php",
+    },
+}
 
 
 MOCK_MATERIALS: list[dict[str, Any]] = [
@@ -178,12 +211,20 @@ class CredentialStore:
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    user TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS service_credentials (
                     user TEXT NOT NULL,
                     service_key TEXT NOT NULL,
                     label TEXT NOT NULL,
-                    base_url TEXT NOT NULL,
-                    login_url TEXT,
                     username TEXT NOT NULL,
                     password TEXT NOT NULL,
                     notes TEXT,
@@ -193,7 +234,155 @@ class CredentialStore:
                 )
                 """
             )
+            self._migrate_service_credentials_table(connection)
+            self._bootstrap_users_from_credentials(connection)
             connection.commit()
+
+    def _migrate_service_credentials_table(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(service_credentials)").fetchall()
+        }
+
+        legacy_columns = {"base_url", "login_url"}
+        if not legacy_columns.intersection(columns):
+            return
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS service_credentials_v2 (
+                user TEXT NOT NULL,
+                service_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user, service_key)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO service_credentials_v2 (
+                user,
+                service_key,
+                label,
+                username,
+                password,
+                notes,
+                created_at,
+                updated_at
+            )
+            SELECT
+                user,
+                service_key,
+                label,
+                username,
+                password,
+                notes,
+                created_at,
+                updated_at
+            FROM service_credentials
+            """
+        )
+        connection.execute("DROP TABLE service_credentials")
+        connection.execute("ALTER TABLE service_credentials_v2 RENAME TO service_credentials")
+
+    def _bootstrap_users_from_credentials(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO users (user, display_name)
+            SELECT DISTINCT user, user
+            FROM service_credentials
+            WHERE user IS NOT NULL AND TRIM(user) != ''
+            """
+        )
+
+    def list_users(self) -> list[UserAccountSummary]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT user, display_name, created_at, updated_at
+                FROM users
+                ORDER BY display_name COLLATE NOCASE, user COLLATE NOCASE
+                """
+            ).fetchall()
+
+        return [
+            UserAccountSummary(
+                user=row["user"],
+                displayName=row["display_name"],
+                createdAt=row["created_at"],
+                updatedAt=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def create_user(self, payload: UserAccountCreateRequest) -> UserAccountSummary:
+        normalized_user = normalize_user_key(payload.user)
+
+        with self._lock, closing(self._connect()) as connection:
+            existing = connection.execute(
+                "SELECT user FROM users WHERE user = ?",
+                (normalized_user,),
+            ).fetchone()
+
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="User already exists.")
+
+            connection.execute(
+                """
+                INSERT INTO users (user, display_name)
+                VALUES (?, ?)
+                """,
+                (normalized_user, payload.displayName.strip()),
+            )
+
+            for service in payload.services:
+                normalized_service = slugify_service_key(service.serviceKey)
+                connection.execute(
+                    """
+                    INSERT INTO service_credentials (
+                        user,
+                        service_key,
+                        label,
+                        username,
+                        password,
+                        notes
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_user,
+                        normalized_service,
+                        service.label.strip(),
+                        service.username.strip(),
+                        service.password,
+                        service.notes.strip() if service.notes else None,
+                    ),
+                )
+
+            connection.commit()
+            row = connection.execute(
+                """
+                SELECT user, display_name, created_at, updated_at
+                FROM users
+                WHERE user = ?
+                """,
+                (normalized_user,),
+            ).fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=500, detail="User account could not be stored.")
+
+        return UserAccountSummary(
+            user=row["user"],
+            displayName=row["display_name"],
+            createdAt=row["created_at"],
+            updatedAt=row["updated_at"],
+        )
 
     def list_services(self, user: str) -> list[StoredServiceCredential]:
         with closing(self._connect()) as connection:
@@ -203,8 +392,6 @@ class CredentialStore:
                     user,
                     service_key,
                     label,
-                    base_url,
-                    login_url,
                     username,
                     password,
                     notes,
@@ -224,24 +411,21 @@ class CredentialStore:
     ) -> StoredServiceCredential:
         normalized_key = slugify_service_key(payload.serviceKey)
         with self._lock, closing(self._connect()) as connection:
+            self._ensure_user_exists(connection, user)
             connection.execute(
                 """
                 INSERT INTO service_credentials (
                     user,
                     service_key,
                     label,
-                    base_url,
-                    login_url,
                     username,
                     password,
                     notes
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user, service_key)
                 DO UPDATE SET
                     label = excluded.label,
-                    base_url = excluded.base_url,
-                    login_url = excluded.login_url,
                     username = excluded.username,
                     password = excluded.password,
                     notes = excluded.notes,
@@ -251,8 +435,6 @@ class CredentialStore:
                     user,
                     normalized_key,
                     payload.label.strip(),
-                    payload.baseUrl.strip(),
-                    payload.loginUrl.strip() if payload.loginUrl else None,
                     payload.username.strip(),
                     payload.password,
                     payload.notes.strip() if payload.notes else None,
@@ -265,8 +447,6 @@ class CredentialStore:
                     user,
                     service_key,
                     label,
-                    base_url,
-                    login_url,
                     username,
                     password,
                     notes,
@@ -296,13 +476,20 @@ class CredentialStore:
             raise HTTPException(status_code=404, detail="Service credentials not found.")
 
     @staticmethod
+    def _ensure_user_exists(connection: sqlite3.Connection, user: str) -> None:
+        row = connection.execute("SELECT user FROM users WHERE user = ?", (user,)).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail="User account not found. Create the account before storing service credentials.",
+            )
+
+    @staticmethod
     def _row_to_credential(row: sqlite3.Row) -> StoredServiceCredential:
         return StoredServiceCredential(
             user=row["user"],
             serviceKey=row["service_key"],
             label=row["label"],
-            baseUrl=row["base_url"],
-            loginUrl=row["login_url"],
             username=row["username"],
             password=row["password"],
             notes=row["notes"],
@@ -319,21 +506,35 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/users", response_model=UserAccountListResponse)
+def list_users() -> UserAccountListResponse:
+    return UserAccountListResponse(users=credential_store.list_users())
+
+
+@app.post("/api/users", response_model=UserAccountSummary)
+def create_user(payload: UserAccountCreateRequest) -> UserAccountSummary:
+    return credential_store.create_user(payload)
+
+
 @app.get("/api/users/{user}/services", response_model=ServiceCredentialListResponse)
 def list_service_credentials(user: str) -> ServiceCredentialListResponse:
-    return ServiceCredentialListResponse(user=user, services=credential_store.list_services(user))
+    normalized_user = normalize_user_key(user)
+    return ServiceCredentialListResponse(
+        user=normalized_user,
+        services=credential_store.list_services(normalized_user),
+    )
 
 
 @app.post("/api/users/{user}/services", response_model=StoredServiceCredential)
 def upsert_service_credentials(
     user: str, payload: ServiceCredentialUpsertRequest
 ) -> StoredServiceCredential:
-    return credential_store.upsert_service(user, payload)
+    return credential_store.upsert_service(normalize_user_key(user), payload)
 
 
 @app.delete("/api/users/{user}/services/{service_key}")
 def delete_service_credentials(user: str, service_key: str) -> dict[str, str]:
-    credential_store.delete_service(user, service_key)
+    credential_store.delete_service(normalize_user_key(user), service_key)
     return {"status": "deleted"}
 
 
@@ -536,13 +737,13 @@ def normalize_terms(values: list[str]) -> list[str]:
 
 
 def serialize_service_credentials(user: str) -> list[dict[str, str | None]]:
-    services = credential_store.list_services(user)
+    services = credential_store.list_services(normalize_user_key(user))
     return [
         {
             "serviceKey": service.serviceKey,
             "label": service.label,
-            "baseUrl": service.baseUrl,
-            "loginUrl": service.loginUrl,
+            "baseUrl": SERVICE_LOGIN_URLS.get(service.serviceKey, {}).get("baseUrl"),
+            "loginUrl": SERVICE_LOGIN_URLS.get(service.serviceKey, {}).get("loginUrl"),
             "username": service.username,
             "password": service.password,
             "notes": service.notes,
@@ -560,6 +761,13 @@ def slugify_service_key(raw_value: str) -> str:
     if len(compact) < 2:
         raise HTTPException(status_code=422, detail="serviceKey must contain letters or numbers.")
     return compact
+
+
+def normalize_user_key(raw_value: str) -> str:
+    normalized = raw_value.strip().lower()
+    if len(normalized) < 2:
+        raise HTTPException(status_code=422, detail="user must contain at least 2 characters.")
+    return normalized
 
 
 def calculate_material_score(material: dict[str, Any], terms: list[str]) -> float:

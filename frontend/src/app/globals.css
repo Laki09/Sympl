@@ -37,6 +37,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -225,9 +226,19 @@ h1 {
   padding: 0 12px;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--accent);
   outline: 3px solid rgba(18, 109, 98, 0.18);
+}
+
+.field select {
+  appearance: none;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  min-height: 42px;
+  padding: 0 12px;
 }
 
 .credential-actions {
@@ -266,6 +277,11 @@ h1 {
 .service-list {
   display: grid;
   gap: 10px;
+}
+
+.account-toolbar {
+  display: grid;
+  gap: 12px;
 }
 
 .service-card {

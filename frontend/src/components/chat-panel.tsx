@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { sendChatMessage } from "@/lib/api";
 import type { ChatMessage } from "@/lib/types";
 
@@ -175,7 +177,22 @@ export function ChatPanel() {
       <div className="message-list" aria-live="polite">
         {messages.map((message) => (
           <article className={`message message-${message.role}`} key={message.id}>
-            <p>{message.content}</p>
+            {message.role === "assistant" ? (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ children, href }) => (
+                    <a href={href} rel="noreferrer" target="_blank">
+                      {children}
+                    </a>
+                  ),
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
+            ) : (
+              <p>{message.content}</p>
+            )}
           </article>
         ))}
       </div>

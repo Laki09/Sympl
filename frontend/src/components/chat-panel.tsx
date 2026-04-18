@@ -47,7 +47,7 @@ export function ChatPanel() {
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [accounts, setAccounts] = useState<UserAccountSummary[]>([]);
-  const [selectedUser, setSelectedUser] = useState("");
+  const [selectedUser, setSelectedUser] = useState("demo-user");
   const [services, setServices] = useState<StoredServiceCredential[]>([]);
   const [accountForm, setAccountForm] = useState<AccountFormState>({
     user: "",
@@ -99,7 +99,7 @@ export function ChatPanel() {
       try {
         const response = await fetchUsers();
         setAccounts(response.users);
-        setSelectedUser((current) => current || response.users[0]?.user || "");
+        setSelectedUser((current) => current || response.users[0]?.user || "demo-user");
       } catch (unknownError) {
         setAccountError(
           unknownError instanceof Error
@@ -414,7 +414,7 @@ export function ChatPanel() {
               onChange={(event) => setSelectedUser(event.target.value)}
               value={selectedUser}
             >
-              <option value="">Account auswaehlen</option>
+              <option value="demo-user">Demo User</option>
               {accounts.map((account) => (
                 <option key={account.user} value={account.user}>
                   {account.displayName} ({account.user})

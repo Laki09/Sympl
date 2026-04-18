@@ -1,9 +1,13 @@
+import json
 import os
+import re
 import sqlite3
 from contextlib import closing
+from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from dotenv import dotenv_values
@@ -24,6 +28,11 @@ DIFY_API_KEY = CONFIG.get("DIFY_API_KEY")
 DIFY_APP_MODE = CONFIG.get("DIFY_APP_MODE", "chat").lower()
 DIFY_INPUT_KEY = CONFIG.get("DIFY_INPUT_KEY", "query")
 FRONTEND_ORIGIN = CONFIG.get("FRONTEND_ORIGIN", "http://localhost:3000")
+ENABLE_LIVE_PORTAL_CRAWLING = str(CONFIG.get("ENABLE_LIVE_PORTAL_CRAWLING", "")).lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 app = FastAPI(title="Sympl Backend")
 
@@ -101,6 +110,7 @@ class MaterialSearchRequest(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     limit: int = Field(default=5, ge=1, le=20)
+    user: str = "demo-user"
 
 
 class MaterialItem(BaseModel):
@@ -119,6 +129,17 @@ class MaterialSearchResponse(BaseModel):
     query: str
     matchedKeywords: list[str]
     materials: list[MaterialItem]
+
+
+class CrawledMaterialStatus(BaseModel):
+    source: str
+    cached: bool
+    count: int
+    path: str
+
+
+class CrawledMaterialStatusResponse(BaseModel):
+    sources: list[CrawledMaterialStatus]
 
 
 SERVICE_LOGIN_URLS: dict[str, dict[str, str]] = {
@@ -194,9 +215,64 @@ MOCK_MATERIALS: list[dict[str, Any]] = [
         "summary": "Anforderungen, Bewertungsschema und Abgabefristen fuer das Teamprojekt.",
         "tags": ["software engineering", "projekt", "anforderungen", "deadline"],
     },
+    {
+        "id": "moodle-analysis2-chapter-03-script",
+        "title": "Analysis 2: Kapitel 3 - Mehrdimensionale Differentialrechnung",
+        "source": "moodle",
+        "course": "Analysis 2",
+        "type": "script",
+        "url": "https://moodle.example.edu/course/analysis2/chapter-03.pdf",
+        "summary": "Skriptkapitel zu partiellen Ableitungen, Gradienten, Jacobi-Matrizen und Taylor-Formeln.",
+        "tags": ["analysis 2", "kapitel 3", "mehrdimensionale differentialrechnung", "gradient"],
+    },
+    {
+        "id": "moodle-analysis2-exercise-03",
+        "title": "Analysis 2: Uebungsblatt 3",
+        "source": "moodle",
+        "course": "Analysis 2",
+        "type": "exercise",
+        "url": "https://moodle.example.edu/course/analysis2/exercise-03.pdf",
+        "summary": "Aufgaben zu partiellen Ableitungen, Richtungsableitungen und lokalen Extrema.",
+        "tags": ["analysis 2", "uebungsblatt", "kapitel 3", "partielle ableitungen"],
+    },
+    {
+        "id": "artemis-analysis2-quiz-03",
+        "title": "Artemis Quiz: Analysis 2 Kapitel 3",
+        "source": "artemis",
+        "course": "Analysis 2",
+        "type": "quiz",
+        "url": "https://artemis.example.edu/courses/analysis2/quizzes/chapter-03",
+        "summary": "Selbsttest zu Gradienten, Hesse-Matrizen und Extremwertproblemen.",
+        "tags": ["analysis 2", "quiz", "kapitel 3", "gradient", "hesse matrix"],
+    },
+    {
+        "id": "moodle-analysis3-chapter-03-script",
+        "title": "Analysis 3: Kapitel 3 - Integration auf Mannigfaltigkeiten",
+        "source": "moodle",
+        "course": "Analysis 3",
+        "type": "script",
+        "url": "https://moodle.example.edu/course/analysis3/chapter-03.pdf",
+        "summary": "Skriptkapitel zu Kurvenintegralen, Oberflaechenintegralen und Integralsaetzen.",
+        "tags": ["analysis 3", "kapitel 3", "integration", "mannigfaltigkeiten", "stokes"],
+    },
+    {
+        "id": "artemis-analysis3-exercise-03",
+        "title": "Artemis Aufgabe: Analysis 3 Kapitel 3",
+        "source": "artemis",
+        "course": "Analysis 3",
+        "type": "exercise",
+        "url": "https://artemis.example.edu/courses/analysis3/exercises/chapter-03",
+        "summary": "Aufgaben zu Kurvenintegralen, Flussintegralen und dem Satz von Stokes.",
+        "tags": ["analysis 3", "kapitel 3", "kurvenintegral", "stokes"],
+    },
 ]
 
 DATABASE_PATH = ROOT_DIR / "backend" / "sympl.db"
+SESSIONS_DIR = ROOT_DIR / "backend" / "sessions"
+CRAWLED_MATERIAL_PATHS = {
+    "artemis": SESSIONS_DIR / "artemis-materials.json",
+    "moodle": SESSIONS_DIR / "moodle-materials.json",
+}
 
 
 class CredentialStore:
@@ -542,18 +618,50 @@ def delete_service_credentials(user: str, service_key: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+@app.get("/api/materials/status", response_model=CrawledMaterialStatusResponse)
+def material_status() -> CrawledMaterialStatusResponse:
+    return CrawledMaterialStatusResponse(
+        sources=[
+            CrawledMaterialStatus(
+                source=source,
+                cached=path.exists(),
+                count=len(load_crawled_materials(source)),
+                path=str(path.relative_to(ROOT_DIR)),
+            )
+            for source, path in sorted(CRAWLED_MATERIAL_PATHS.items())
+        ]
+    )
+
+
 @app.post("/api/materials/search", response_model=MaterialSearchResponse)
 def search_materials(raw_payload: dict[str, Any] = Body(default_factory=dict)) -> MaterialSearchResponse:
     payload = normalize_material_search_payload(raw_payload)
     requested_terms = normalize_terms([payload.query, *payload.keywords])
     requested_sources = {source.lower() for source in payload.sources}
+    credentials_by_source = get_credentials_by_source(payload.user)
+
+    candidate_materials: list[dict[str, Any]] = []
+
+    if not requested_sources or "moodle" in requested_sources:
+        candidate_materials.extend(
+            search_moodle_materials(payload, credentials_by_source.get("moodle"))
+        )
+
+    if not requested_sources or "artemis" in requested_sources:
+        candidate_materials.extend(
+            search_artemis_materials(payload, credentials_by_source.get("artemis"))
+        )
+
+    if not candidate_materials:
+        candidate_materials = [
+            material
+            for material in MOCK_MATERIALS
+            if not requested_sources or material["source"].lower() in requested_sources
+        ]
 
     ranked_materials: list[MaterialItem] = []
 
-    for material in MOCK_MATERIALS:
-        if requested_sources and material["source"].lower() not in requested_sources:
-            continue
-
+    for material in candidate_materials:
         score = calculate_material_score(material, requested_terms)
 
         if score <= 0 and requested_terms:
@@ -666,12 +774,69 @@ def parse_dify_response(data: dict[str, Any]) -> ChatResponse:
         )
 
     outputs = data.get("data", {}).get("outputs", {})
-    answer = outputs.get("answer") or outputs.get("text") or outputs.get("result")
+    answer = extract_workflow_answer(outputs)
 
     if not answer:
         answer = str(outputs) if outputs else "Der Workflow hat keine Antwort ausgegeben."
 
     return ChatResponse(answer=answer)
+
+
+def extract_workflow_answer(outputs: Any) -> str:
+    if isinstance(outputs, str):
+        return outputs
+
+    if not isinstance(outputs, dict):
+        return ""
+
+    preferred_keys = [
+        "answer",
+        "text",
+        "result",
+        "output",
+        "response",
+        "content",
+        "final_answer",
+        "finalAnswer",
+        "summary",
+    ]
+
+    for key in preferred_keys:
+        value = outputs.get(key)
+        answer = stringify_answer_value(value)
+
+        if answer:
+            return answer
+
+    for value in outputs.values():
+        answer = stringify_answer_value(value)
+
+        if answer:
+            return answer
+
+    return ""
+
+
+def stringify_answer_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+
+    if isinstance(value, list):
+        parts = [stringify_answer_value(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(value, dict):
+        nested_answer = extract_workflow_answer(value)
+
+        if nested_answer:
+            return nested_answer
+
+        return json.dumps(value, ensure_ascii=False)
+
+    return ""
 
 
 def normalize_material_search_payload(raw_payload: dict[str, Any]) -> MaterialSearchRequest:
@@ -686,6 +851,13 @@ def normalize_material_search_payload(raw_payload: dict[str, Any]) -> MaterialSe
 
     keywords = ensure_string_list(raw_payload.get("keywords"))
     sources = ensure_string_list(raw_payload.get("sources")) or ["moodle", "artemis"]
+    user = (
+        raw_payload.get("user")
+        or raw_payload.get("sys_user_id")
+        or raw_payload.get("sys.user_id")
+        or raw_payload.get("userId")
+        or "demo-user"
+    )
 
     try:
         limit = int(raw_payload.get("limit", 5))
@@ -706,6 +878,7 @@ def normalize_material_search_payload(raw_payload: dict[str, Any]) -> MaterialSe
         keywords=keywords,
         sources=sources,
         limit=max(1, min(limit, 20)),
+        user=normalize_user_key(str(user)),
     )
 
 
@@ -728,13 +901,33 @@ def ensure_string_list(value: Any) -> list[str]:
 
 
 def normalize_terms(values: list[str]) -> list[str]:
+    stopwords = {
+        "ich",
+        "will",
+        "möchte",
+        "moechte",
+        "lernen",
+        "bitte",
+        "zum",
+        "zur",
+        "der",
+        "die",
+        "das",
+        "ein",
+        "eine",
+        "und",
+        "oder",
+    }
     terms: list[str] = []
 
     for value in values:
         for raw_term in value.lower().replace(",", " ").split():
             term = raw_term.strip()
 
-            if len(term) >= 3 and term not in terms:
+            if term in stopwords:
+                continue
+
+            if (len(term) >= 3 or term.isdigit()) and term not in terms:
                 terms.append(term)
 
     return terms
@@ -749,11 +942,194 @@ def serialize_service_credentials(user: str) -> list[dict[str, str | None]]:
             "baseUrl": SERVICE_LOGIN_URLS.get(service.serviceKey, {}).get("baseUrl"),
             "loginUrl": SERVICE_LOGIN_URLS.get(service.serviceKey, {}).get("loginUrl"),
             "username": service.username,
-            "password": service.password,
+            "hasPassword": "true" if service.password else "false",
             "notes": service.notes,
         }
         for service in services
     ]
+
+
+def get_credentials_by_source(user: str) -> dict[str, StoredServiceCredential]:
+    return {
+        service.serviceKey: service
+        for service in credential_store.list_services(normalize_user_key(user))
+    }
+
+
+def search_moodle_materials(
+    payload: MaterialSearchRequest,
+    credential: StoredServiceCredential | None,
+) -> list[dict[str, Any]]:
+    cached_materials = load_crawled_materials("moodle")
+    if cached_materials:
+        return cached_materials
+
+    source_materials = [
+        material for material in MOCK_MATERIALS if material["source"].lower() == "moodle"
+    ]
+
+    if not credential or not ENABLE_LIVE_PORTAL_CRAWLING:
+        return source_materials
+
+    live_materials = fetch_public_portal_links(
+        source="moodle",
+        base_url=SERVICE_LOGIN_URLS["moodle"]["baseUrl"],
+        course_hint=payload.query,
+    )
+
+    return live_materials or source_materials
+
+
+def search_artemis_materials(
+    payload: MaterialSearchRequest,
+    credential: StoredServiceCredential | None,
+) -> list[dict[str, Any]]:
+    cached_materials = load_crawled_materials("artemis")
+    if cached_materials:
+        return cached_materials
+
+    source_materials = [
+        material for material in MOCK_MATERIALS if material["source"].lower() == "artemis"
+    ]
+
+    if not credential or not ENABLE_LIVE_PORTAL_CRAWLING:
+        return source_materials
+
+    live_materials = fetch_public_portal_links(
+        source="artemis",
+        base_url=SERVICE_LOGIN_URLS["artemis"]["baseUrl"],
+        course_hint=payload.query,
+    )
+
+    return live_materials or source_materials
+
+
+def load_crawled_materials(source: str) -> list[dict[str, Any]]:
+    path = CRAWLED_MATERIAL_PATHS.get(source)
+    if not path or not path.exists():
+        return []
+
+    try:
+        raw_materials = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    materials: list[dict[str, Any]] = []
+
+    for index, raw_material in enumerate(raw_materials, start=1):
+        if not isinstance(raw_material, dict):
+            continue
+
+        title = str(raw_material.get("title") or "").strip()
+        url = str(raw_material.get("url") or "").strip()
+
+        if not title or not url:
+            continue
+
+        material_source = str(raw_material.get("source") or source).lower()
+        material_type = str(
+            raw_material.get("type") or infer_material_type(title, url)
+        )
+        tags = ensure_string_list(raw_material.get("tags")) or [material_source, material_type]
+
+        materials.append(
+            {
+                "id": str(raw_material.get("id") or f"{material_source}-cached-{index}"),
+                "title": title,
+                "source": material_source,
+                "course": str(raw_material.get("course") or "Unknown course"),
+                "type": material_type,
+                "url": url,
+                "summary": str(raw_material.get("summary") or title),
+                "tags": tags,
+            }
+        )
+
+    return materials
+
+
+def fetch_public_portal_links(source: str, base_url: str, course_hint: str) -> list[dict[str, Any]]:
+    try:
+        response = requests.get(base_url, timeout=12)
+        response.raise_for_status()
+    except requests.RequestException:
+        return []
+
+    extractor = LinkExtractor(base_url)
+    extractor.feed(response.text)
+
+    materials: list[dict[str, Any]] = []
+
+    for index, link in enumerate(extractor.links[:30], start=1):
+        title = link["text"] or link["url"]
+        materials.append(
+            {
+                "id": f"{source}-live-{index}",
+                "title": title[:160],
+                "source": source,
+                "course": course_hint,
+                "type": infer_material_type(title, link["url"]),
+                "url": link["url"],
+                "summary": f"Live gefundener Link aus {source}: {title}",
+                "tags": [source, course_hint, infer_material_type(title, link["url"])],
+            }
+        )
+
+    return materials
+
+
+class LinkExtractor(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.links: list[dict[str, str]] = []
+        self._current_href: str | None = None
+        self._current_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+
+        href = dict(attrs).get("href")
+        if not href:
+            return
+
+        self._current_href = urljoin(self.base_url, href)
+        self._current_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_href:
+            self._current_text.append(data.strip())
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._current_href:
+            return
+
+        text = " ".join(part for part in self._current_text if part).strip()
+
+        if self._current_href.startswith("http"):
+            self.links.append({"url": self._current_href, "text": text})
+
+        self._current_href = None
+        self._current_text = []
+
+
+def infer_material_type(title: str, url: str) -> str:
+    value = f"{title} {url}".lower()
+
+    if ".pdf" in value or "script" in value or "skript" in value:
+        return "script"
+
+    if "exercise" in value or "uebung" in value or "übung" in value or "aufgabe" in value:
+        return "exercise"
+
+    if "quiz" in value:
+        return "quiz"
+
+    if "slide" in value or "folie" in value:
+        return "slides"
+
+    return "link"
 
 
 def slugify_service_key(raw_value: str) -> str:
@@ -775,19 +1151,44 @@ def normalize_user_key(raw_value: str) -> str:
 
 
 def calculate_material_score(material: dict[str, Any], terms: list[str]) -> float:
-    searchable_text = " ".join(
-        [
-            material["title"],
-            material["source"],
-            material["course"],
-            material["type"],
-            material["summary"],
-            " ".join(material["tags"]),
-        ],
-    ).lower()
-
     if not terms:
         return 0.5
 
-    hits = sum(1 for term in terms if term in searchable_text)
-    return round(hits / len(terms), 2)
+    title = material["title"].lower()
+    course = material["course"].lower()
+    summary = material["summary"].lower()
+    tags = " ".join(material["tags"]).lower()
+    type_value = material["type"].lower()
+    weighted_score = 0.0
+    max_score = len(terms) * 4.0
+
+    for term in terms:
+        if term.isdigit():
+            term_pattern = re.compile(rf"(?<![\d.]){re.escape(term)}(?![\d.])")
+            term_hits = {
+                "title": bool(term_pattern.search(title)),
+                "course": bool(term_pattern.search(course)),
+                "summary": bool(term_pattern.search(summary)),
+                "tags": bool(term_pattern.search(tags)),
+            }
+        else:
+            term_hits = {
+                "title": term in title,
+                "course": term in course,
+                "summary": term in summary,
+                "tags": term in tags,
+            }
+
+        if term_hits["title"]:
+            weighted_score += 2.0
+        if term_hits["course"]:
+            weighted_score += 1.5
+        if term_hits["summary"]:
+            weighted_score += 0.4
+        if term_hits["tags"]:
+            weighted_score += 0.1
+
+    if "script" in type_value or "exercise" in type_value:
+        weighted_score += 0.15
+
+    return round(min(weighted_score / max_score, 1.0), 2)

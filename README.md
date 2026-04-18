@@ -28,6 +28,7 @@ DIFY_API_KEY=your-real-dify-workflow-api-key
 DIFY_APP_MODE=workflow
 DIFY_INPUT_KEY=Prompt
 FRONTEND_ORIGIN=http://localhost:3000
+ENABLE_LIVE_PORTAL_CRAWLING=false
 ```
 
 The project is configured for a Dify Workflow by default:
@@ -85,12 +86,17 @@ Body:
 
 ```json
 {
+  "user": "{{ sys.user_id }}",
   "query": "{{ prompt_analyzer.query }}",
   "keywords": "{{ prompt_analyzer.keywords }}",
   "sources": "{{ prompt_analyzer.sources }}",
   "limit": 5
 }
 ```
+
+The `user` field is important: Dify should pass the workflow user id back to the
+backend. The backend then loads the stored Moodle/Artemis credentials for that
+user and performs the portal lookup itself.
 
 When testing with Dify Cloud, your backend must be publicly reachable. Local
 `http://localhost:8000` only works if Dify is also running on your machine. For
@@ -116,13 +122,35 @@ Additional workflow inputs available on every request:
       "baseUrl": "https://moodle.example.edu",
       "loginUrl": "https://moodle.example.edu/login",
       "username": "student@example.edu",
-      "password": "secret",
+      "hasPassword": "true",
       "notes": "optional"
     }
   ],
   "available_services": ["moodle"]
 }
 ```
+
+Passwords are intentionally not forwarded to Dify. Dify only decides which
+sources are needed. The backend keeps credentials local and uses them inside
+`/api/materials/search`.
+
+### Moodle and Artemis Crawling
+
+`/api/materials/search` now routes source searches through connector functions:
+
+```text
+search_materials
+  -> search_moodle_materials
+  -> search_artemis_materials
+  -> ranking/filtering
+```
+
+By default, the connector functions use realistic local fallback materials. Set
+`ENABLE_LIVE_PORTAL_CRAWLING=true` to let the connectors try a public HTTP fetch
+from the portal base URLs. TUM SSO often requires browser-based login and 2FA, so
+the current live hook is intentionally conservative and does not send passwords
+to arbitrary login pages. The next production step is a dedicated browser/session
+connector for TUM SSO.
 
 Start the backend:
 
@@ -142,6 +170,7 @@ Mock material search for a Dify HTTP node:
 curl -X POST http://localhost:8000/api/materials/search \
   -H "Content-Type: application/json" \
   -d '{
+    "user": "demo-user",
     "query": "lineare regression uebungsblatt",
     "keywords": ["regression", "gradient descent"],
     "sources": ["moodle", "artemis"],
@@ -153,6 +182,7 @@ Request body:
 
 ```json
 {
+  "user": "demo-user",
   "query": "lineare regression uebungsblatt",
   "keywords": ["regression", "gradient descent"],
   "sources": ["moodle", "artemis"],

@@ -123,6 +123,8 @@ class MaterialItem(BaseModel):
     summary: str
     tags: list[str]
     relevance: float
+    reason: str | None = None
+    matches: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MaterialSearchResponse(BaseModel):
@@ -138,8 +140,15 @@ class CrawledMaterialStatus(BaseModel):
     path: str
 
 
+class MaterialIndexStatus(BaseModel):
+    cached: bool
+    count: int
+    path: str
+
+
 class CrawledMaterialStatusResponse(BaseModel):
     sources: list[CrawledMaterialStatus]
+    index: MaterialIndexStatus
 
 
 SERVICE_LOGIN_URLS: dict[str, dict[str, str]] = {
@@ -273,6 +282,7 @@ CRAWLED_MATERIAL_PATHS = {
     "artemis": SESSIONS_DIR / "artemis-materials.json",
     "moodle": SESSIONS_DIR / "moodle-materials.json",
 }
+MATERIAL_INDEX_PATH = SESSIONS_DIR / "material-index.json"
 
 
 class CredentialStore:
@@ -629,7 +639,12 @@ def material_status() -> CrawledMaterialStatusResponse:
                 path=str(path.relative_to(ROOT_DIR)),
             )
             for source, path in sorted(CRAWLED_MATERIAL_PATHS.items())
-        ]
+        ],
+        index=MaterialIndexStatus(
+            cached=MATERIAL_INDEX_PATH.exists(),
+            count=len(load_material_index()),
+            path=str(MATERIAL_INDEX_PATH.relative_to(ROOT_DIR)),
+        ),
     )
 
 
@@ -641,16 +656,20 @@ def search_materials(raw_payload: dict[str, Any] = Body(default_factory=dict)) -
     credentials_by_source = get_credentials_by_source(payload.user)
 
     candidate_materials: list[dict[str, Any]] = []
+    indexed_materials = search_indexed_materials(requested_terms, requested_sources)
 
-    if not requested_sources or "moodle" in requested_sources:
-        candidate_materials.extend(
-            search_moodle_materials(payload, credentials_by_source.get("moodle"))
-        )
+    if indexed_materials:
+        candidate_materials.extend(indexed_materials)
+    else:
+        if not requested_sources or "moodle" in requested_sources:
+            candidate_materials.extend(
+                search_moodle_materials(payload, credentials_by_source.get("moodle"))
+            )
 
-    if not requested_sources or "artemis" in requested_sources:
-        candidate_materials.extend(
-            search_artemis_materials(payload, credentials_by_source.get("artemis"))
-        )
+        if not requested_sources or "artemis" in requested_sources:
+            candidate_materials.extend(
+                search_artemis_materials(payload, credentials_by_source.get("artemis"))
+            )
 
     if not candidate_materials:
         candidate_materials = [
@@ -902,6 +921,20 @@ def ensure_string_list(value: Any) -> list[str]:
 
 def normalize_terms(values: list[str]) -> list[str]:
     stopwords = {
+        "a",
+        "about",
+        "an",
+        "and",
+        "for",
+        "in",
+        "learn",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "today",
+        "want",
         "ich",
         "will",
         "möchte",
@@ -918,6 +951,24 @@ def normalize_terms(values: list[str]) -> list[str]:
         "und",
         "oder",
     }
+    synonyms = {
+        "continuity": ["stetigkeit"],
+        "continuous": ["stetig"],
+        "convergence": ["konvergenz"],
+        "derivative": ["ableitung"],
+        "derivatives": ["ableitungen"],
+        "differentiation": ["differentialrechnung"],
+        "function": ["funktion"],
+        "functions": ["funktionen"],
+        "limit": ["grenzwert"],
+        "limits": ["grenzwerte"],
+        "real": ["reell", "reelle"],
+        "sequence": ["folge"],
+        "sequences": ["folgen"],
+        "series": ["reihen"],
+        "summation": ["reihen"],
+        "taylor": ["taylor", "taylorentwicklung"],
+    }
     terms: list[str] = []
 
     for value in values:
@@ -929,6 +980,10 @@ def normalize_terms(values: list[str]) -> list[str]:
 
             if (len(term) >= 3 or term.isdigit()) and term not in terms:
                 terms.append(term)
+
+                for synonym in synonyms.get(term, []):
+                    if synonym not in terms:
+                        terms.append(synonym)
 
     return terms
 
@@ -1002,6 +1057,121 @@ def search_artemis_materials(
     )
 
     return live_materials or source_materials
+
+
+def search_indexed_materials(
+    requested_terms: list[str],
+    requested_sources: set[str],
+) -> list[dict[str, Any]]:
+    indexed_items = load_material_index()
+    materials: list[dict[str, Any]] = []
+
+    for indexed_item in indexed_items:
+        source = str(indexed_item.get("source") or "").lower()
+
+        if requested_sources and source not in requested_sources:
+            continue
+
+        matches = find_index_matches(indexed_item, requested_terms)
+        text_preview = str(indexed_item.get("textPreview") or "")
+        topics = ensure_string_list(indexed_item.get("topics"))
+        tags = ensure_string_list(indexed_item.get("tags")) + topics[:8]
+        summary = str(indexed_item.get("summary") or indexed_item.get("title") or "")
+
+        if matches:
+            best_match = matches[0]
+            summary = f"{summary} Relevant snippet page {best_match['page']}: {best_match['snippet']}"
+
+        materials.append(
+            {
+                "id": str(indexed_item.get("id") or indexed_item.get("url")),
+                "title": str(indexed_item.get("title") or ""),
+                "source": source,
+                "course": str(indexed_item.get("course") or "Unknown course"),
+                "type": str(indexed_item.get("type") or "link"),
+                "url": str(indexed_item.get("url") or ""),
+                "summary": summary,
+                "tags": tags,
+                "searchText": " ".join(
+                    [
+                        text_preview,
+                        " ".join(topics),
+                        json.dumps(indexed_item.get("chapters") or [], ensure_ascii=False),
+                    ]
+                ),
+                "reason": build_index_reason(matches, topics),
+                "matches": matches[:3],
+            }
+        )
+
+    return materials
+
+
+def load_material_index() -> list[dict[str, Any]]:
+    if not MATERIAL_INDEX_PATH.exists():
+        return []
+
+    try:
+        raw_items = json.loads(MATERIAL_INDEX_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
+def find_index_matches(indexed_item: dict[str, Any], terms: list[str]) -> list[dict[str, Any]]:
+    if not terms:
+        return []
+
+    matches: list[dict[str, Any]] = []
+
+    for page in indexed_item.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+
+        text = str(page.get("text") or "")
+        lower_text = text.lower()
+        hit_terms = [term for term in terms if term in lower_text]
+
+        if not hit_terms:
+            continue
+
+        matches.append(
+            {
+                "page": page.get("page"),
+                "snippet": build_snippet(text, hit_terms[0]),
+                "terms": hit_terms,
+            }
+        )
+
+    matches.sort(key=lambda match: len(match["terms"]), reverse=True)
+    return matches
+
+
+def build_snippet(text: str, term: str, radius: int = 220) -> str:
+    lower_text = text.lower()
+    index = lower_text.find(term.lower())
+
+    if index < 0:
+        return text[: radius * 2].strip()
+
+    start = max(index - radius, 0)
+    end = min(index + len(term) + radius, len(text))
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
+def build_index_reason(matches: list[dict[str, Any]], topics: list[str]) -> str | None:
+    if matches:
+        first_match = matches[0]
+        terms = ", ".join(first_match.get("terms") or [])
+        return f"PDF text match on page {first_match.get('page')} for: {terms}"
+
+    if topics:
+        return f"Indexed PDF topics include: {', '.join(topics[:5])}"
+
+    return None
 
 
 def load_crawled_materials(source: str) -> list[dict[str, Any]]:
@@ -1159,8 +1329,9 @@ def calculate_material_score(material: dict[str, Any], terms: list[str]) -> floa
     summary = material["summary"].lower()
     tags = " ".join(material["tags"]).lower()
     type_value = material["type"].lower()
+    search_text = str(material.get("searchText") or "").lower()
     weighted_score = 0.0
-    max_score = len(terms) * 4.0
+    max_score = len(terms) * 5.5
 
     for term in terms:
         if term.isdigit():
@@ -1170,6 +1341,7 @@ def calculate_material_score(material: dict[str, Any], terms: list[str]) -> floa
                 "course": bool(term_pattern.search(course)),
                 "summary": bool(term_pattern.search(summary)),
                 "tags": bool(term_pattern.search(tags)),
+                "searchText": bool(term_pattern.search(search_text)),
             }
         else:
             term_hits = {
@@ -1177,6 +1349,7 @@ def calculate_material_score(material: dict[str, Any], terms: list[str]) -> floa
                 "course": term in course,
                 "summary": term in summary,
                 "tags": term in tags,
+                "searchText": term in search_text,
             }
 
         if term_hits["title"]:
@@ -1187,8 +1360,13 @@ def calculate_material_score(material: dict[str, Any], terms: list[str]) -> floa
             weighted_score += 0.4
         if term_hits["tags"]:
             weighted_score += 0.1
+        if term_hits["searchText"]:
+            weighted_score += 1.5
 
     if "script" in type_value or "exercise" in type_value:
         weighted_score += 0.15
+
+    if material.get("matches"):
+        weighted_score += 0.4
 
     return round(min(weighted_score / max_score, 1.0), 2)

@@ -15,12 +15,22 @@ const initialMessages: ChatMessage[] = [
   },
 ];
 
-const thinkingStatuses = ["crawling", "searching", "thinking"];
+const SEARCHING_DURATION_MS = 5_000;
+const CRAWLING_DURATION_MS = 8_000;
+const MINIMUM_THINKING_SEQUENCE_MS = SEARCHING_DURATION_MS + CRAWLING_DURATION_MS;
+
+type ThinkingStatus = "searching" | "crawling" | "thinking";
 
 type MockUser = {
   user: string;
   displayName: string;
 };
+
+function delay(durationMs: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
+}
 
 export function ChatPanel() {
   const [displayName, setDisplayName] = useState("");
@@ -30,21 +40,30 @@ export function ChatPanel() {
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [isSending, setIsSending] = useState(false);
-  const [thinkingStatusIndex, setThinkingStatusIndex] = useState(0);
+  const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus>("searching");
   const [authError, setAuthError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSending) {
-      setThinkingStatusIndex(0);
+      setThinkingStatus("searching");
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      setThinkingStatusIndex((current) => (current + 1) % thinkingStatuses.length);
-    }, 1100);
+    setThinkingStatus("searching");
 
-    return () => window.clearInterval(intervalId);
+    const crawlingTimeoutId = window.setTimeout(() => {
+      setThinkingStatus("crawling");
+    }, SEARCHING_DURATION_MS);
+
+    const thinkingTimeoutId = window.setTimeout(() => {
+      setThinkingStatus("thinking");
+    }, MINIMUM_THINKING_SEQUENCE_MS);
+
+    return () => {
+      window.clearTimeout(crawlingTimeoutId);
+      window.clearTimeout(thinkingTimeoutId);
+    };
   }, [isSending]);
 
   const canEnterChat = useMemo(() => {
@@ -94,7 +113,19 @@ export function ChatPanel() {
     setChatError(null);
 
     try {
-      const response = await sendChatMessage(query, conversationId, activeUser.user);
+      const responsePromise = sendChatMessage(query, conversationId, activeUser.user)
+        .then((response) => ({ response }))
+        .catch((error: unknown) => ({ error }));
+      const minimumDelayPromise = delay(MINIMUM_THINKING_SEQUENCE_MS);
+      const result = await responsePromise;
+
+      await minimumDelayPromise;
+
+      if ("error" in result) {
+        throw result.error;
+      }
+
+      const { response } = result;
       setConversationId(response.conversationId);
       setMessages((current) => [
         ...current,
@@ -131,7 +162,7 @@ export function ChatPanel() {
           <h1>
             <span>Stop searching</span>
             <span>Start learning</span>
-            <span>Sympl.</span>
+            <span className="auth-gradient-word">Sympl.</span>
           </h1>
           <p className="auth-copy">from students for students</p>
         </div>
@@ -151,7 +182,7 @@ export function ChatPanel() {
               <span>Name</span>
               <input
                 onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="Rufus"
+                placeholder="Username"
                 value={displayName}
               />
             </label>
@@ -215,7 +246,7 @@ export function ChatPanel() {
         {isSending ? (
           <article className="message message-assistant message-thinking" aria-live="polite">
             <span className="thinking-dot" aria-hidden="true" />
-            <span>{thinkingStatuses[thinkingStatusIndex]}</span>
+            <span>{thinkingStatus}</span>
           </article>
         ) : null}
       </div>
@@ -229,7 +260,7 @@ export function ChatPanel() {
             value={input}
           />
           <button className="send-button" disabled={!canSubmit} type="submit">
-            {isSending ? thinkingStatuses[thinkingStatusIndex] : "Send"}
+            {isSending ? "..." : "Send"}
           </button>
         </div>
 

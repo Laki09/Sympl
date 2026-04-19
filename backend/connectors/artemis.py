@@ -24,14 +24,16 @@ ARTEMIS_PASSWORD = os.getenv("ARTEMIS_PASSWORD", "")
 ARTEMIS_BASE_URL = os.getenv("ARTEMIS_BASE_URL", "https://artemis.tum.de/")
 ARTEMIS_SEARCH_QUERY = os.getenv("ARTEMIS_SEARCH_QUERY", "Analysis Kapitel 3")
 ARTEMIS_HEADLESS = os.getenv("ARTEMIS_HEADLESS", "false").lower() == "true"
+ARTEMIS_SETUP_ONLY = os.getenv("ARTEMIS_SETUP_ONLY", "false").lower() == "true"
+ARTEMIS_SLOW_MO = int(os.getenv("ARTEMIS_SLOW_MO", "0"))
 ARTEMIS_SESSION_PATH = Path(
     os.getenv("ARTEMIS_SESSION_PATH", "backend/sessions/artemis-storage-state.json")
 )
 ARTEMIS_OUTPUT_PATH = Path(
     os.getenv("ARTEMIS_OUTPUT_PATH", "backend/sessions/artemis-materials.json")
 )
-ARTEMIS_MAX_COURSES = int(os.getenv("ARTEMIS_MAX_COURSES", "8"))
-ARTEMIS_MAX_MATERIALS_PER_COURSE = int(os.getenv("ARTEMIS_MAX_MATERIALS_PER_COURSE", "80"))
+ARTEMIS_MAX_COURSES = int(os.getenv("ARTEMIS_MAX_COURSES", "50"))
+ARTEMIS_MAX_MATERIALS_PER_COURSE = int(os.getenv("ARTEMIS_MAX_MATERIALS_PER_COURSE", "120"))
 ARTEMIS_COURSE_IDS = [
     course_id.strip()
     for course_id in os.getenv("ARTEMIS_COURSE_IDS", "").split(",")
@@ -46,20 +48,39 @@ async def crawl_artemis_materials(
     headless: bool = ARTEMIS_HEADLESS,
 ) -> list[CrawledMaterial]:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
+        browser = await playwright.chromium.launch(headless=headless, slow_mo=ARTEMIS_SLOW_MO)
         context = await create_context(browser, ARTEMIS_SESSION_PATH)
         page = await context.new_page()
 
         await ensure_logged_in(page, context, username, password)
+
+        if ARTEMIS_SETUP_ONLY:
+            await run_setup_only(page, context)
+            await browser.close()
+            return []
+
         materials = await extract_api_materials(context, query)
+        visible_materials = await extract_visible_materials(page, context, query)
+        materials = unique_materials([*materials, *visible_materials])
 
         if not materials:
-            materials = await extract_visible_materials(page, query)
+            materials = visible_materials
 
         await context.storage_state(path=str(ARTEMIS_SESSION_PATH))
         await browser.close()
 
     return unique_materials(materials)
+
+
+async def run_setup_only(page: Page, context: BrowserContext) -> None:
+    await page.goto(ARTEMIS_BASE_URL, wait_until="domcontentloaded")
+    print()
+    print("Artemis setup mode is active.")
+    print("Use the opened browser to log in, adjust Artemis settings, or inspect your courses.")
+    print("Press Enter in this terminal when you are done. The session will be saved.")
+    await asyncio.to_thread(input)
+    await context.storage_state(path=str(ARTEMIS_SESSION_PATH))
+    print(f"Saved Artemis session to {ARTEMIS_SESSION_PATH}")
 
 
 async def create_context(browser, storage_path: Path) -> BrowserContext:
@@ -160,16 +181,22 @@ async def first_visible_locator(page: Page, selectors: list[str]):
     return None
 
 
-async def extract_visible_materials(page: Page, query: str) -> list[CrawledMaterial]:
+async def extract_visible_materials(
+    page: Page,
+    context: BrowserContext,
+    query: str,
+) -> list[CrawledMaterial]:
     await page.goto(urljoin(ARTEMIS_BASE_URL, "/courses"), wait_until="networkidle")
-    await try_artemis_search(page, query)
 
     materials: list[CrawledMaterial] = []
-    course_links = await collect_course_links(page, query)
+    course_links = await collect_course_links(page)
+    old_course_links = await collect_old_course_links(page)
+    course_links = unique_links([*course_links, *old_course_links])
 
     for course_index, course_link in enumerate(course_links[:ARTEMIS_MAX_COURSES], start=1):
         course_title = course_link["text"] or query
         course_url = course_link["url"]
+        course_id = extract_course_id_from_url(course_url)
 
         materials.append(
             build_material(
@@ -181,12 +208,62 @@ async def extract_visible_materials(page: Page, query: str) -> list[CrawledMater
             )
         )
 
+        if course_id:
+            materials.extend(
+                await extract_course_api_materials(
+                    context=context,
+                    course_id=course_id,
+                    course_title=course_title,
+                )
+            )
+
         materials.extend(await extract_course_materials(page, course_url, course_title, course_index))
 
     if materials:
         return materials
 
     return await extract_materials_from_current_page(page, query, id_prefix="artemis-visible")
+
+
+async def collect_old_course_links(page: Page) -> list[dict[str, str]]:
+    old_courses_link = await find_old_courses_link(page)
+
+    if old_courses_link is None:
+        return []
+
+    try:
+        archive_url = await old_courses_link.get_attribute("href")
+        if archive_url:
+            await page.goto(normalize_artemis_url(archive_url), wait_until="networkidle", timeout=30_000)
+        else:
+            await old_courses_link.click()
+            await page.wait_for_url("**/courses/archive", timeout=30_000)
+            await page.wait_for_load_state("networkidle", timeout=30_000)
+    except Exception:
+        return []
+
+    return await collect_course_links(page)
+
+
+async def find_old_courses_link(page: Page):
+    locators = [
+        page.locator("a:has-text('hier')").last,
+        page.locator("a:has-text('alten Kursen')").first,
+        page.locator("a:has-text('old courses')").first,
+        page.locator("a[href*='archive']").first,
+    ]
+
+    for locator in locators:
+        if await locator.count() == 0:
+            continue
+
+        try:
+            if await locator.is_visible(timeout=1_000):
+                return locator
+        except Exception:
+            continue
+
+    return None
 
 
 async def extract_api_materials(context: BrowserContext, query: str) -> list[CrawledMaterial]:
@@ -204,11 +281,6 @@ async def extract_api_materials(context: BrowserContext, query: str) -> list[Cra
         course_id = course["id"]
         course_title = course["title"]
         course_url = normalize_artemis_url(f"/courses/{course_id}")
-        course_dashboard = await fetch_artemis_json(
-            context,
-            f"api/core/courses/{course_id}/for-dashboard",
-        )
-        course_title = resolve_course_title(course_dashboard, course_id, course_title)
 
         materials.append(
             build_material(
@@ -220,31 +292,45 @@ async def extract_api_materials(context: BrowserContext, query: str) -> list[Cra
             )
         )
 
-        materials.extend(extract_exercise_materials(course_dashboard, course_id, course_title))
-
-        lectures = await fetch_artemis_json(context, f"api/lecture/courses/{course_id}/lectures")
-        materials.extend(await extract_lecture_materials(context, lectures, course_id, course_title))
-
-        lectures_with_slides = await fetch_artemis_json(
-            context,
-            f"api/lecture/courses/{course_id}/lectures-with-slides",
-        )
         materials.extend(
-            await extract_lecture_materials(context, lectures_with_slides, course_id, course_title)
-        )
-
-        tutorial_lectures = await fetch_artemis_json(
-            context,
-            f"api/lecture/courses/{course_id}/tutorial-lectures",
-        )
-        materials.extend(
-            await extract_lecture_materials(context, tutorial_lectures, course_id, course_title)
+            await extract_course_api_materials(
+                context=context,
+                course_id=course_id,
+                course_title=course_title,
+            )
         )
 
         if len(materials) >= ARTEMIS_MAX_COURSES * ARTEMIS_MAX_MATERIALS_PER_COURSE:
             break
 
     return unique_materials(materials)
+
+
+async def extract_course_api_materials(
+    context: BrowserContext,
+    course_id: str,
+    course_title: str,
+) -> list[CrawledMaterial]:
+    materials: list[CrawledMaterial] = []
+    course_dashboard = await fetch_artemis_json(
+        context,
+        f"api/core/courses/{course_id}/for-dashboard",
+    )
+    course_title = resolve_course_title(course_dashboard, course_id, course_title)
+
+    materials.extend(extract_exercise_materials(course_dashboard, course_id, course_title))
+
+    lecture_endpoints = [
+        f"api/lecture/courses/{course_id}/lectures",
+        f"api/lecture/courses/{course_id}/lectures-with-slides",
+        f"api/lecture/courses/{course_id}/tutorial-lectures",
+    ]
+
+    for endpoint in lecture_endpoints:
+        lectures = await fetch_artemis_json(context, endpoint)
+        materials.extend(await extract_lecture_materials(context, lectures, course_id, course_title))
+
+    return unique_materials(materials)[:ARTEMIS_MAX_MATERIALS_PER_COURSE]
 
 
 async def fetch_artemis_json(context: BrowserContext, endpoint: str) -> Any:
@@ -400,6 +486,17 @@ async def extract_lecture_materials(
             )
         )
 
+        lecture_details = await fetch_artemis_json(context, f"api/lecture/lectures/{lecture_id}/details")
+        materials.extend(
+            extract_attachment_materials(
+                raw_value=lecture_details,
+                course_id=course_id,
+                course_title=course_title,
+                lecture_id=lecture_id,
+                lecture_title=lecture_title,
+            )
+        )
+
         attachments = await fetch_artemis_json(
             context,
             f"api/lecture/lectures/{lecture_id}/attachments",
@@ -471,9 +568,8 @@ def extract_attachment_materials(
     return materials
 
 
-async def collect_course_links(page: Page, query: str) -> list[dict[str, str]]:
+async def collect_course_links(page: Page) -> list[dict[str, str]]:
     anchors = await collect_anchors(page)
-    query_terms = normalize_query_terms(query)
     course_links: list[dict[str, str]] = []
 
     for anchor in anchors:
@@ -488,12 +584,6 @@ async def collect_course_links(page: Page, query: str) -> list[dict[str, str]]:
             continue
 
         text = anchor["text"] or f"Artemis course {path_parts[1]}"
-        lower_text = text.lower()
-
-        if query_terms and not any(term in lower_text for term in query_terms):
-            # Keep courses even without a title match if they came from filtered search results.
-            if "/courses/" not in page.url:
-                continue
 
         course_links.append({"url": url, "text": text})
 
@@ -566,7 +656,11 @@ async def collect_anchors(page: Page) -> list[dict[str, str]]:
         """
         anchors => anchors.map(anchor => ({
           url: anchor.href,
-          text: anchor.innerText || anchor.getAttribute('aria-label') || anchor.title || ''
+          text: anchor.innerText ||
+            anchor.getAttribute('aria-label') ||
+            anchor.title ||
+            anchor.closest('.card, [class*="course"], [class*="Course"]')?.innerText ||
+            ''
         }))
         """
     )
@@ -633,14 +727,34 @@ def build_material(
         source="artemis",
         course=course,
         type=material_type,
-        url=normalize_artemis_url(url),
+        url=normalize_artemis_material_url(url),
         summary=summary,
         tags=["artemis", course, material_type],
     )
 
 
+def normalize_artemis_material_url(url: str) -> str:
+    normalized_url = normalize_artemis_url(url)
+    parsed_url = urlparse(normalized_url)
+    path = parsed_url.path.lstrip("/")
+
+    if path.startswith("attachments/"):
+        return normalize_artemis_url(f"/api/core/files/{path}")
+
+    return normalized_url
+
+
 def normalize_artemis_url(url: str) -> str:
     return urljoin(ARTEMIS_BASE_URL, url)
+
+
+def extract_course_id_from_url(url: str) -> str | None:
+    path_parts = urlparse(normalize_artemis_url(url)).path.strip("/").split("/")
+
+    if len(path_parts) >= 2 and path_parts[0] == "courses" and path_parts[1].isdigit():
+        return path_parts[1]
+
+    return None
 
 
 def normalize_query_terms(query: str) -> list[str]:
@@ -743,6 +857,10 @@ def unique_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
 
 async def main() -> None:
     materials = await crawl_artemis_materials()
+
+    if ARTEMIS_SETUP_ONLY:
+        return
+
     write_materials_json(materials, ARTEMIS_OUTPUT_PATH)
     print(f"Wrote {len(materials)} Artemis materials to {ARTEMIS_OUTPUT_PATH}")
 

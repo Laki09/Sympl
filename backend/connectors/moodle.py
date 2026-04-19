@@ -27,7 +27,7 @@ MOODLE_SESSION_PATH = Path(
     os.getenv("MOODLE_SESSION_PATH", "backend/sessions/moodle-storage-state.json")
 )
 MOODLE_OUTPUT_PATH = Path(os.getenv("MOODLE_OUTPUT_PATH", "backend/sessions/moodle-materials.json"))
-MOODLE_MAX_COURSES = int(os.getenv("MOODLE_MAX_COURSES", "12"))
+MOODLE_MAX_COURSES = int(os.getenv("MOODLE_MAX_COURSES", "50"))
 MOODLE_MAX_MATERIALS_PER_COURSE = int(os.getenv("MOODLE_MAX_MATERIALS_PER_COURSE", "120"))
 MOODLE_COURSE_IDS = [
     course_id.strip()

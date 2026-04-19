@@ -92,14 +92,23 @@ button {
 
 h1 {
   font-size: clamp(2.4rem, 5vw, 5.2rem);
-  line-height: 0.95;
+  line-height: 1.12;
   margin: 0;
   max-width: none;
 }
 
 h1 span {
   display: block;
+  line-height: 1.12;
   white-space: nowrap;
+}
+
+.auth-gradient-word {
+  background: linear-gradient(135deg, #bb5d38, #d98f58);
+  background-clip: text;
+  color: transparent;
+  padding-bottom: 0.08em;
+  -webkit-background-clip: text;
 }
 
 .auth-copy {
